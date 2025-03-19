@@ -78,7 +78,7 @@ class PCMHeatPumpSystem:
         # Use a threshold to determine mode based on pcm_mode input
         pcm_mode_input = action.get('pcm_mode', 0)
         if pcm_mode_input == 0:
-            mode = 'normnal'
+            mode = 'normal'
         elif pcm_mode_input == 1:
             mode = 'discharging'
         else:
@@ -96,6 +96,8 @@ class PCMHeatPumpSystem:
             T_cond = action.get('T_cond', 0)
             Q_cool = self.compute_Q_cool(rpm, T_cond)
             EER = self.compute_EER(rpm, T_cond)
+
+            print(Q_cool, EER)
 
             # Cooling energy delivered during the time step (kWh)
             cooling_energy = Q_cool * self.dt / 3600.0
@@ -141,11 +143,11 @@ class PCMHeatPumpSystem:
 
             # Determine how much energy is available to discharge.
             # Even if the storage is full (or more than 27 kWh), only 27 kWh is retrievable.
-            available_discharge = min(self.storage_energy, self.max_discharge_energy)
+            self.storage_energy = min(self.storage_energy, self.max_discharge_energy)
 
             # Calculate the energy requested during this time step (kWh)
             discharge_energy_requested = Q_discharge_requested * self.dt / 3600.0
-            actual_discharge_energy = min(discharge_energy_requested, available_discharge)
+            actual_discharge_energy = min(discharge_energy_requested, self.storage_energy)
 
             # Update the PCM storage by subtracting the discharged energy.
             self.storage_energy -= actual_discharge_energy
@@ -197,22 +199,13 @@ if __name__ == "__main__":
     # Example action for normal operation (no PCM intervention)
     action_normal = {
         'rpm': 2500,        # example rpm value
-        'T_cond': 35,       # example condenser temperature in °C
+        'T_cond': 40,       # example condenser temperature in °C
         'pcm_mode': 0       # near zero -> normal operation
     }
 
     # Step in normal mode
     obs = system.step(action_normal)
     print("Normal operation observation:", obs)
-
-    # Example action for charging mode (positive pcm_mode)
-    action_charging = {
-        'rpm': 1500,
-        'T_cond': 35,
-        'pcm_mode': 2
-    }
-    obs = system.step(action_charging)
-    print("Charging mode observation:", obs)
 
     # Example action for discharging mode (negative pcm_mode)
     action_discharging = {
