@@ -4,13 +4,13 @@ import os
 import cvxpy as cp
 import matplotlib.pyplot as plt
 from datetime import timedelta
-from env.pcm_storage import PCMStorage
+from env.pcm_storage import PCMHeatPumpSystem
 
 
-system = PCMStorage(dt=900, initial_storage=32.0)
+system = PCMHeatPumpSystem(dt=900, initial_storage=27.0)
 
 
-def mpc_controller(system, horizon=4, dt=900, datetime='2022-08-31', df=None):
+def mpc_controller(system, horizon=4*12, dt=900, datetime='2021-08-31 00:00:00', df=None):
     """
     Model Predictive Controller for the PCM heat pump system.
     """
@@ -25,15 +25,15 @@ def mpc_controller(system, horizon=4, dt=900, datetime='2022-08-31', df=None):
     load = cp.Parameter(horizon)  # Building load
 
     T_cond.value = df.loc[
-        datetime:datetime+timedelta(hours=12), 'outdoor_temp'
+        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15), 'outdoor_temp'
     ].values
 
     e_price.value = df.loc[
-        datetime:datetime+timedelta(hours=12), 'e_price'
+        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15), 'e_price'
     ].values
 
     load.value = df.loc[
-        datetime:datetime+timedelta(hours=12), 'load'
+        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15), 'load'
     ].values
 
     # Initialize cost and constraints list
@@ -44,6 +44,7 @@ def mpc_controller(system, horizon=4, dt=900, datetime='2022-08-31', df=None):
     EER = []
     e = []
     SoC = []
+    Q_cool = []
 
     for t in range(horizon):
         constraints += [rpm[t] <= 2900]  # Maximum rpm
@@ -59,12 +60,15 @@ def mpc_controller(system, horizon=4, dt=900, datetime='2022-08-31', df=None):
         EER += obs['EER']
         e += obs['energy_consumed']
         SoC += obs['storage_energy']  # update SoC
+        Q_cool += obs['Q_cool']  # Cooling capacity of HP
 
-        constraints += [x[t + 1] == SoC]
+        constraints += [x[t + 1] == SoC[-1]]  # Update SoC
 
         constraints += [x[t + 1] <= 27.0]  # SoC limits
 
         constraints += [Q_dis[t] <= 5]  # Maximum discharge power
+
+        constraints += [Q_cool[-1] == load[t] - Q_dis[t]]  # Energy balance
 
         cost += e_price[t] * e[-1]
 
@@ -86,6 +90,6 @@ def mpc_controller(system, horizon=4, dt=900, datetime='2022-08-31', df=None):
         'e_price': e_price.value
     }
 
-    system.reset(initial_storage=32.0)
+    system.reset(initial_storage=27.0)
 
     return res
