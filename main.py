@@ -22,7 +22,11 @@ results = pd.DataFrame()
 
 while date < end_date:
     # Run the MPC controller
-    res = mpc_controller(system, horizon=12*4, dt=900, datetime=date, df=total_df)
+    res = mpc_controller(system,
+                         horizon=12*4,
+                         dt=900,
+                         datetime=date,
+                         df=total_df)
     date += timedelta(hours=24)
     print(res)
 

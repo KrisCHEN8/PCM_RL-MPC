@@ -25,15 +25,18 @@ def mpc_controller(system, horizon=4*12, dt=900, datetime='2021-08-31 00:00:00',
     load = cp.Parameter(horizon)  # Building load
 
     T_cond.value = df.loc[
-        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15), 'outdoor_temp'
+        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15),
+        'outdoor_temp'
     ].values
 
     e_price.value = df.loc[
-        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15), 'e_price'
+        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15),
+        'e_price'
     ].values
 
     load.value = df.loc[
-        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15), 'load'
+        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15),
+        'load'
     ].values
 
     # Initialize cost and constraints list
