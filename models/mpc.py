@@ -1,98 +1,182 @@
 import numpy as np
 import pandas as pd
-import os
 import cvxpy as cp
-import matplotlib.pyplot as plt
 from datetime import timedelta
-from env.pcm_storage import PCMHeatPumpSystem
+from env.pcm_storage import hp_system, pcm_system
+import pyswarms as ps
 
 
-system = PCMHeatPumpSystem(dt=900, initial_storage=27.0)
+hp_system = hp_system(dt=900)  # Initialize the HP system
+pcm_system = pcm_system(dt=900, SoC=27.0)  # Initialize the PCM storage
+
+df = pd.read_pickle('data/total_df.pkl')
 
 
-def mpc_controller(system, horizon=4*12, dt=900, datetime='2021-08-31 00:00:00', df=None):
-    """
-    Model Predictive Controller for the PCM heat pump system.
-    """
-    # Define the optimization variables
-    x = cp.Variable(horizon + 1, nonneg=True)   # SoC of the storage
-    u = cp.Variable(horizon, boolean=True)       # Operation mode
-    rpm = cp.Variable(horizon, nonneg=True)     # Compressor speed
-    Q_dis = cp.Variable(horizon, nonneg=True)   # Discharge heat from PCM in kW
+def mpc_controller(
+        hp_system, pcm_system,
+        horizon=4*12, dt=900,
+        datetime='2021-06-01 00:00:00', df=df
+):
+    rpm = cp.Variable(horizon, nonneg=True)
+    Q_dot_disc = cp.Variable(horizon, nonneg=True)
+    soc = cp.Variable(horizon + 1)
 
-    T_cond = cp.Parameter(horizon)  # Condenser temperature
-    e_price = cp.Parameter(horizon)  # Electricity price
-    load = cp.Parameter(horizon)  # Building load
+    T_cond = df.loc[
+        datetime:datetime+timedelta(hours=horizon/4)-timedelta(minutes=15),
+        'outdoor_temp'].values
 
-    T_cond.value = df.loc[
-        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15),
-        'outdoor_temp'
-    ].values
+    e_price = df.loc[
+        datetime:datetime+timedelta(hours=horizon/4)-timedelta(minutes=15),
+        'e_price'].values
 
-    e_price.value = df.loc[
-        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15),
-        'e_price'
-    ].values
+    load = df.loc[
+        datetime:datetime+timedelta(hours=horizon/4)-timedelta(minutes=15),
+        'load'].values
 
-    load.value = df.loc[
-        datetime:datetime+timedelta(hours=horizon/4)- timedelta(minutes=15),
-        'load'
-    ].values
-
-    # Initialize cost and constraints list
+    constraints = [soc[0] == 27.0]
     cost = 0
-    constraints = []
-    constraints += [x[0] == 27.0]  # Initial storage energy
-
-    EER = []
-    e = []
-    SoC = []
-    Q_cool = []
 
     for t in range(horizon):
-        constraints += [rpm[t] <= 2900]  # Maximum rpm
-        constraints += [rpm[t] >= 1200]  # Minimum rpm
+        # HP Cooling power (symbolically)
+        Q_dot_cool = (hp_system.Q_intercept + hp_system.a * rpm[t] +
+                      hp_system.b * T_cond[t] + hp_system.c * rpm[t]**2 +
+                      hp_system.d * T_cond[t]**2)
 
-        action = {
-            'rpm': rpm[t],
-            'T_cond': T_cond[t],
-            'pcm_mode': u[t],
-            'Q_discharge': Q_dis[t]
-        }
-        obs = system.step(action)
-        EER += obs['EER']
-        e += obs['energy_consumed']
-        SoC += obs['storage_energy']  # update SoC
-        Q_cool += obs['Q_cool']  # Cooling capacity of HP
+        EER = (hp_system.EER_intercept + hp_system.e * rpm[t] +
+               hp_system.f * T_cond[t] + hp_system.g * rpm[t]**2 +
+               hp_system.h * T_cond[t]**2)
 
-        constraints += [x[t + 1] == SoC[-1]]  # Update SoC
+        Q_cool = Q_dot_cool * dt / 3600.0
+        e_hp = Q_cool / EER
 
-        constraints += [x[t + 1] <= 27.0]  # SoC limits
+        # PCM storage update
+        constraints += [soc[t+1] == soc[t] - Q_dot_disc[t] * dt / 3600.0]
 
-        constraints += [Q_dis[t] <= 5]  # Maximum discharge power
+        # Energy balance constraint
+        constraints += [Q_dot_cool + Q_dot_disc[t] == load[t]]
 
-        constraints += [Q_cool[-1] == load[t] - Q_dis[t]]  # Energy balance
+        # RPM limits
+        constraints += [rpm[t] <= 2900, rpm[t] >= 1200]
 
-        cost += e_price[t] * e[-1]
+        # PCM constraints
+        constraints += [
+            soc[t+1] <= 27.0,
+            soc[t+1] >= 0.0,
+            Q_dot_disc[t] <= 5.0]
 
-    objective = cp.Minimize(cost)
-    problem = cp.Problem(objective, constraints)
+        # Accumulate cost
+        cost += e_price[t] * e_hp
 
-    # Solve the optimization problem
+    problem = cp.Problem(cp.Minimize(cost), constraints)
     problem.solve()
 
-    # Extract the optimal states and actions
     res = {
-        'pcm_mode': u.value,
         'rpm': rpm.value,
-        'Q_discharge': Q_dis.value,
-        'EER': EER,
-        'energy_consumed': e,
-        'storage_energy': x.value[:-1],
-        'outdoor_temp': T_cond.value,
-        'e_price': e_price.value
+        'Q_discharge': Q_dot_disc.value,
+        'storage_energy': soc.value[:-1],
+        'outdoor_temp': T_cond,
+        'e_price': e_price
     }
 
-    system.reset(initial_storage=27.0)
+    return res
+
+
+def mpc_pso_controller(hp_system, horizon=12, dt=900,
+                       datetime='2021-06-01 00:00:00', df=None):
+
+    import numpy as np
+    import pandas as pd
+    import pyswarms as ps
+    from datetime import timedelta
+
+    def fitness(x, hp_system, horizon, dt, T_cond, e_price, load, initial_soc=27.0):
+        n_particles = x.shape[0]
+        rpm = x[:, :horizon]
+        Q_dot_disc = x[:, horizon:]
+
+        penalty = np.zeros(n_particles)
+        cost = np.zeros(n_particles)
+
+        for i in range(n_particles):
+            soc = np.zeros(horizon + 1)
+            soc[0] = initial_soc
+
+            for t in range(horizon):
+                Q_dot_cool = (
+                    hp_system.Q_intercept + hp_system.a * rpm[i, t] +
+                    hp_system.b * T_cond[t] + hp_system.c * rpm[i, t] ** 2 +
+                    hp_system.d * T_cond[t] ** 2
+                )
+
+                EER = (
+                    hp_system.EER_intercept + hp_system.e * rpm[i, t] +
+                    hp_system.f * T_cond[t] + hp_system.g * rpm[i, t] ** 2 +
+                    hp_system.h * T_cond[t] ** 2
+                )
+
+                Q_cool = Q_dot_cool * dt / 3600.0
+                e_hp = Q_cool / EER
+
+                soc[t + 1] = soc[t] - Q_dot_disc[i, t] * dt / 3600.0
+
+                penalty[i] += 1e4 * np.abs(max(0, rpm[i, t] - 2900))
+                penalty[i] += 1e4 * np.abs(max(0, 1200 - rpm[i, t]))
+                penalty[i] += 1e4 * np.abs(max(0, Q_dot_disc[i, t] - 5))
+                penalty[i] += 1e4 * (max(0, soc[t + 1] - 27.0) + max(0, -soc[t + 1]))
+
+                energy_balance = Q_dot_cool + Q_dot_disc[i, t] - load[t]
+                penalty[i] += 1e4 * np.abs(energy_balance)
+
+                cost[i] += e_price[t] * e_hp
+
+        total_cost = cost + penalty
+
+        return total_cost
+
+    datetime_obj = pd.to_datetime(datetime)
+
+    T_cond = df.loc[
+        datetime_obj:datetime_obj+timedelta(hours=horizon/4)-timedelta(minutes=15),
+        'outdoor_temp'].values
+
+    e_price = df.loc[
+        datetime_obj:datetime_obj+timedelta(hours=horizon/4)-timedelta(minutes=15),
+        'e_price'].values
+
+    load = df.loc[
+        datetime_obj:datetime_obj+timedelta(hours=horizon/4)-timedelta(minutes=15),
+        'load'].values
+
+    lb = np.concatenate((np.full(horizon, 1200), np.zeros(horizon)))
+    ub = np.concatenate((np.full(horizon, 2900), np.full(horizon, 5)))
+
+    bounds = (lb, ub)
+
+    optimizer = ps.single.GlobalBestPSO(
+        n_particles=50, dimensions=2 * horizon,
+        options={'c1': 1.5, 'c2': 1.5, 'w': 0.5}, bounds=bounds
+    )
+
+    best_cost, best_pos = optimizer.optimize(
+        fitness, iters=100, hp_system=hp_system, horizon=horizon, dt=dt,
+        T_cond=T_cond, e_price=e_price, load=load
+    )
+
+    rpm_optimal = best_pos[:horizon]
+    Q_discharge_optimal = best_pos[horizon:]
+
+    soc = np.zeros(horizon + 1)
+    soc[0] = 27.0
+    for t in range(horizon):
+        soc[t + 1] = soc[t] - Q_discharge_optimal[t] * dt / 3600.0
+
+    res = pd.DataFrame({
+        'rpm': rpm_optimal,
+        'Q_discharge': Q_discharge_optimal,
+        'storage_energy': soc[:-1],
+        'outdoor_temp': T_cond,
+        'e_price': e_price,
+        'best_cost': np.full(horizon, best_cost)
+    })
 
     return res
