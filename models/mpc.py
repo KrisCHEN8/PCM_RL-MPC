@@ -1,29 +1,38 @@
+import sys, os
+
+# This explicitly tells Python where to find your modules
+sys.path.insert(0, os.path.abspath('.'))
+
+# Verify the path added
+print("Python Path:", sys.path[0])
+
+# Now import your module
+from env.pcm_storage import hp_system, pcm_system
 import numpy as np
 import pandas as pd
 import cvxpy as cp
 from datetime import timedelta
-from env.pcm_storage import hp_system, pcm_system
+from env.pcm_storage import hp_system
 import pyswarms as ps
 
 
 hp_system = hp_system(dt=900)  # Initialize the HP system
-pcm_system = pcm_system(dt=900, SoC=27.0)  # Initialize the PCM storage
 
-df = pd.read_pickle('data/total_df.pkl')
+df = pd.read_pickle('data/total_df_hourly.pkl')
 
 
 def mpc_controller(
         hp_system,
-        horizon=6, dt=900,
-        datetime='2021-06-01 00:00:00', df=df,
-        rpm_init=2000, soc_init=27.0
+        horizon=12, dt=3600,
+        datetime='2021-06-01 10:00:00', df=df,
+        rpm_init=2000, soc_init=1.0, Q_pcm=5.0
 ):
+    start_time = pd.to_datetime(datetime)
+
     rpm = cp.Variable(horizon + 1, nonneg=True)
-    Q_dot_disc = cp.Variable(horizon, nonneg=True)
-    Q_dot_char = cp.Variable(horizon, nonneg=True)
-    soc = cp.Variable(horizon + 1)
-    # u_disc = cp.Variable(horizon, boolean=True)
-    u_charge = cp.Variable(horizon, boolean=True)
+    soc = cp.Variable(horizon + 1, nonneg=True)
+    u_pcm = cp.Variable(horizon, boolean=True)
+    u_hp = cp.Variable(horizon, boolean=True)
 
     T_cond = df.loc[
         datetime:datetime+timedelta(hours=horizon-1),
@@ -31,14 +40,16 @@ def mpc_controller(
 
     e_price = df.loc[
         datetime:datetime+timedelta(hours=horizon-1),
-        'e_price'].values
+        'e_price'].values * 0.001
 
     load = df.loc[
         datetime:datetime+timedelta(hours=horizon-1),
         'load'].values
 
-    constraints = [soc[0] == soc_init,
-                   rpm[0] == rpm_init]
+    constraints = [
+        rpm[0] == rpm_init,
+        soc[0] == soc_init
+        ]
 
     cost = 0
 
@@ -47,53 +58,50 @@ def mpc_controller(
         constraints += [cp.abs(rpm[t+1] - rpm[t]) <= delta_rpm]
 
     for t in range(horizon):
+        time_step = start_time + timedelta(hours=t)
+
+        # Define daytime hours (e.g., 9 AM to 9 PM)
+        day_start, day_end = 9, 21
+
+        # Create a binary mask for daytime
+        daytime_mask = 1 if day_start <= time_step.hour < day_end else 0
+
+        Q_dot_pcm = Q_pcm * (1 - daytime_mask) - Q_pcm * daytime_mask
+
         # HP Cooling power
-        Q_dot_cool = (hp_system.Q_intercept + hp_system.a * rpm[t+1] +
-                      hp_system.b * T_cond[t] + hp_system.c * rpm[t+1]**2 +
-                      hp_system.d * T_cond[t]**2)
+        Q_dot_cool = hp_system.Q_intercept + hp_system.a * rpm[t+1] + \
+            hp_system.b * T_cond[t] + hp_system.c * rpm[t+1]**2 + \
+            hp_system.d * T_cond[t]**2
 
-        EER = (hp_system.EER_intercept + hp_system.e * rpm[t+1] +
-               hp_system.f * T_cond[t] + hp_system.g * rpm[t+1]**2 +
-               hp_system.h * T_cond[t]**2)
+        EER = hp_system.EER_intercept + hp_system.e * rpm[t+1] + \
+            hp_system.f * T_cond[t] + hp_system.g * rpm[t+1]**2 + \
+            hp_system.h * T_cond[t]**2
 
-        Q_cool = Q_dot_cool * dt / 3600.0
-        e_hp = Q_cool / EER  # Electricity consumption in kWh
+        Q_cool = Q_dot_cool * (dt / 3600.0) * u_hp[t]
+        e_hp = Q_cool / EER  # if EER != 0 else 0.0
+        Q_action = Q_dot_pcm * dt / 3600.0
 
-        # PCM storage update
+        # SoC update
         constraints += [
-            soc[t+1] == soc[t] - (Q_dot_disc[t] * dt / 3600.0) / (27.0) +
-            (Q_dot_char[t] * dt / 3600.0) / (32.0)
-        ]
-
-        bigM = 1e6
-    # Energy balance constraints enforcing exclusive modes:
-        constraints += [
-            # When u_charge[t]==0 (supply load mode):
-            Q_dot_cool + Q_dot_disc[t] >= load[t] - bigM * u_charge[t],
-            Q_dot_cool + Q_dot_disc[t] <= load[t] + bigM * u_charge[t],
-
-            # When u_charge[t]==1 (charging mode), load must be zero:
-            load[t] <= bigM * (1 - u_charge[t]),
-
-            # Enforce HP cooling used for charging in charging mode:
-            Q_dot_char[t] <= Q_dot_cool + bigM*(1 - u_charge[t]),
-            Q_dot_char[t] >= Q_dot_cool - bigM*(1 - u_charge[t]),
+            soc[t+1] == soc[t] + u_pcm[t] * Q_action / 27.0
             ]
 
-    # Limits for discharge and charge according to modes:
+        # Energy balance constraints enforcing exclusive modes:
         constraints += [
-            Q_dot_disc[t] <= 5.0 * (1 - u_charge[t]),
-            Q_dot_char[t] <= 5.0 * u_charge[t]
+            Q_cool + u_pcm[t] * Q_action == load[t]
             ]
 
         # RPM limits
-        constraints += [rpm[t+1] <= 2900, rpm[t+1] >= 1200]
+        constraints += [
+            rpm[t+1] <= 2900,
+            rpm[t+1] >= 1200
+            ]
 
-        # PCM constraints
+        # SoC constraints
         constraints += [
             soc[t+1] <= 1.0,
-            soc[t+1] >= 0.0,
-            Q_dot_disc[t] <= 5.0]
+            soc[t+1] >= 0.0
+            ]
 
         # Accumulate cost
         cost += e_price[t] * e_hp
@@ -103,10 +111,12 @@ def mpc_controller(
 
     res = {
         'rpm': rpm.value[1:],
-        'Q_discharge': Q_dot_disc.value,
-        'storage_energy': soc.value[:-1],
+        'u_hp': u_hp.value,
+        'Q_pcm': Q_action * u_pcm.value,
+        'soc': soc.value[:-1],
         'outdoor_temp': T_cond,
-        'e_price': e_price
+        'e_price': e_price,
+        'load': load
     }
 
     res_df = pd.DataFrame(res)
@@ -114,121 +124,185 @@ def mpc_controller(
     return res_df
 
 
-import numpy as np
-import pandas as pd
-import pyswarms as ps
-from datetime import timedelta
+def objective_function(x, hp_system, horizon, dt, start_time,
+                       rpm_init, soc_init, Q_pcm, T_cond, e_price, load, day_mask):
+    """
+    Computes the cost for each particle. The decision vector ordering is:
+      [rpm[0], ..., rpm[horizon], soc[0], ..., soc[horizon],
+       u_pcm[0], ..., u_pcm[horizon-1], u_hp[0], ..., u_hp[horizon-1]]
+       
+    Constraints are imposed via penalty terms.
+    """
+    n_particles = x.shape[0]
+    costs = np.zeros(n_particles)
+    penalty_factor = 1e8  # Adjust this factor as needed
+    delta_rpm = 500       # Maximum allowed change in rpm per time step
 
+    for i in range(n_particles):
+        particle = x[i, :]
+        # Extract decision variables:
+        # rpm: indices 0 to horizon (length horizon+1)
+        rpm = particle[0:(horizon+1)]
+        # soc: indices horizon+1 to 2*(horizon+1)-1
+        soc = particle[(horizon+1):2*(horizon+1)]
+        # u_pcm: next horizon values
+        u_pcm_cont = particle[2*(horizon+1):2*(horizon+1)+horizon]
+        # u_hp: final horizon values
+        u_hp_cont = particle[2*(horizon+1)+horizon:]
+        # Threshold the binary variables:
+        u_pcm = (u_pcm_cont >= 0.5).astype(float)
+        u_hp = (u_hp_cont >= 0.5).astype(float)
 
-def mpc_pso_controller(
-    hp_system,
-    horizon=6, dt=900,
-    datetime='2021-06-01 00:00:00', df=None,
-    rpm_init=2000, soc_init=27.0
-):
+        cost = 0.0
+        penalty = 0.0
 
-    T_cond = df.loc[
-        datetime:datetime+timedelta(hours=horizon-1),
-        'outdoor_temp'].values
+        # Penalize deviations from the initial conditions
+        penalty += penalty_factor * ((rpm[0] - rpm_init)**2)
+        penalty += penalty_factor * ((soc[0] - soc_init)**2)
 
-    e_price = df.loc[
-        datetime:datetime+timedelta(hours=horizon-1),
-        'e_price'].values
+        # Enforce delta rpm constraint
+        for t in range(horizon):
+            diff = np.abs(rpm[t+1] - rpm[t])
+            if diff > delta_rpm:
+                penalty += penalty_factor * ((diff - delta_rpm)**2)
 
-    load = df.loc[
-        datetime:datetime+timedelta(hours=horizon-1),
-        'load'].values
+        # Loop over each time step
+        for t in range(horizon):
+            # Determine Q_dot_pcm and Q_action using the precomputed day mask:
+            mask = day_mask[t]  # 1 if daytime (9-21), 0 otherwise
+            Q_dot_pcm = Q_pcm * (1 - mask) - Q_pcm * mask
+            Q_action = Q_dot_pcm * dt / 3600.0
 
-    n_dim = 4 * horizon  # rpm, Q_dot_disc, Q_dot_char, u_charge
+            # HP cooling power and efficiency using rpm[t+1] and T_cond[t]:
+            r = rpm[t+1]
+            T = T_cond[t]
+            Q_dot_cool = (hp_system.Q_intercept + hp_system.a * r +
+                          hp_system.b * T + hp_system.c * (r**2) +
+                          hp_system.d * (T**2))
+            EER = (hp_system.EER_intercept + hp_system.e * r +
+                   hp_system.f * T + hp_system.g * (r**2) +
+                   hp_system.h * (T**2))
+            # Avoid division by zero in EER:
+            if np.abs(EER) < 1e-6:
+                penalty += penalty_factor * 1e3
+                EER = 1e-6
+            Q_cool = Q_dot_cool * (dt / 3600.0) * u_hp[t]
+            e_hp = Q_cool / EER
 
-    lb = np.concatenate([
-        np.full(horizon, 1200),        # rpm lower bound
-        np.zeros(horizon),             # Q_dot_disc lower bound
-        np.zeros(horizon),             # Q_dot_char lower bound
-        np.zeros(horizon)              # u_charge lower bound (binary)
-    ])
+            # SoC update: soc[t+1] should equal soc[t] + u_pcm[t]*Q_action/27.0
+            soc_pred = soc[t] + (u_pcm[t] * Q_action) / 27.0
+            penalty += penalty_factor * ((soc[t+1] - soc_pred)**2)
 
-    ub = np.concatenate([
-        np.full(horizon, 2900),        # rpm upper bound
-        np.full(horizon, 5.0),         # Q_dot_disc upper bound
-        np.full(horizon, 5.0),         # Q_dot_char upper bound
-        np.ones(horizon)               # u_charge upper bound (binary)
-    ])
+            # Energy balance: Q_cool + u_pcm[t]*Q_action should equal load[t]
+            penalty += penalty_factor * ((Q_cool + u_pcm[t]*Q_action - load[t])**2)
 
-    def fitness(x):
-        n_particles = x.shape[0]
-        penalty = np.zeros(n_particles)
-        cost = np.zeros(n_particles)
+            # Enforce RPM limits at time t+1
+            if r < 1200:
+                penalty += penalty_factor * ((1200 - r)**2)
+            if r > 2900:
+                penalty += penalty_factor * ((r - 2900)**2)
 
-        for i in range(n_particles):
-            rpm = np.concatenate(([rpm_init], x[i, :horizon]))
-            Q_dot_disc = x[i, horizon:2*horizon]
-            Q_dot_char = x[i, 2*horizon:3*horizon]
-            u_charge = np.round(x[i, 3*horizon:]).astype(int)
+            # Enforce SoC limits at time t+1
+            if soc[t+1] < 0:
+                penalty += penalty_factor * ((0 - soc[t+1])**2)
+            if soc[t+1] > 1:
+                penalty += penalty_factor * ((soc[t+1] - 1)**2)
 
-            soc = np.zeros(horizon + 1)
-            soc[0] = soc_init
+            # Accumulate operating cost (energy price * HP energy consumption)
+            cost += e_price[t] * e_hp
 
-            for t in range(horizon):
-                Q_dot_cool = (hp_system.Q_intercept + hp_system.a * rpm[t+1] +
-                              hp_system.b * T_cond[t] + hp_system.c * rpm[t+1]**2 +
-                              hp_system.d * T_cond[t]**2)
+        costs[i] = cost + penalty
 
-                EER = (hp_system.EER_intercept + hp_system.e * rpm[t+1] +
-                       hp_system.f * T_cond[t] + hp_system.g * rpm[t+1]**2 +
-                       hp_system.h * T_cond[t]**2)
+    return costs
 
-                Q_cool = Q_dot_cool * dt / 3600.0
-                e_hp = Q_cool / EER
+def mpc_controller_pso(hp_system, horizon=12, dt=3600,
+                            datetime_str='2021-06-01 10:00:00', df=None,
+                            rpm_init=2000, soc_init=1.0, Q_pcm=5.0,
+                            iters=100, n_particles=50):
+    """
+    Solves the MPC problem using pyswarms with the same objective, constraints, and variables
+    as the cvxpy formulation. The function returns a DataFrame with the computed trajectories.
+    """
+    if df is None:
+        raise ValueError("A valid dataframe 'df' must be provided.")
 
-                soc[t+1] = soc[t] - (Q_dot_disc[t] * dt / 3600.0)/27.0 + (Q_dot_char[t] * dt / 3600.0)/32.0
+    start_time = pd.to_datetime(datetime_str)
+    end_time = start_time + timedelta(hours=horizon-1)
+    # Extract the necessary data from the dataframe
+    T_cond = df.loc[datetime_str:end_time, 'outdoor_temp'].values
+    e_price = df.loc[datetime_str:end_time, 'e_price'].values * 0.001
+    load = df.loc[datetime_str:end_time, 'load'].values
 
-                # Constraints (penalty terms)
-                penalty[i] += 1e6 * max(0, abs(rpm[t+1] - rpm[t]) - 500)
-                penalty[i] += 1e6 * max(0, soc[t+1]-1.0) + 1e6 * max(0, -soc[t+1])
+    # Precompute a binary mask for daytime (1 if between 9:00 and 21:00, else 0)
+    day_mask = np.array([1 if 9 <= (start_time + timedelta(hours=t)).hour < 21 else 0 
+                         for t in range(horizon)])
 
-                # Energy balance constraints
-                if u_charge[t] == 0:
-                    penalty[i] += 1e6 * abs(Q_dot_cool + Q_dot_disc[t] - load[t])
-                    penalty[i] += 1e6 * Q_dot_char[t]  # charging off
-                else:
-                    penalty[i] += 1e6 * abs(load[t])
-                    penalty[i] += 1e6 * abs(Q_dot_char[t] - Q_dot_cool)
-                    penalty[i] += 1e6 * Q_dot_disc[t]  # discharging off
+    # Total decision vector dimension:
+    # (horizon+1) for rpm + (horizon+1) for soc + horizon for u_pcm + horizon for u_hp
+    dim = 2*(horizon+1) + 2*horizon  # equals 4*horizon + 2
 
-                cost[i] += e_price[t] * e_hp
+    # Define lower and upper bounds for each decision variable:
+    lb = np.zeros(dim)
+    ub = np.zeros(dim)
+    
+    # rpm bounds: index 0 fixed to rpm_init; indices 1..horizon between 1200 and 2900.
+    lb[0] = rpm_init
+    ub[0] = rpm_init
+    lb[1:(horizon+1)] = 1200
+    ub[1:(horizon+1)] = 2900
 
-        return cost + penalty
+    # soc bounds: index (horizon+1) fixed to soc_init; indices horizon+2..2*(horizon+1)-1 between 0 and 1.
+    lb[horizon+1] = soc_init
+    ub[horizon+1] = soc_init
+    lb[horizon+2:2*(horizon+1)] = 0.0
+    ub[horizon+2:2*(horizon+1)] = 1.0
 
-    # Run optimization
-    optimizer = ps.single.GlobalBestPSO(
-        n_particles=50, dimensions=n_dim,
-        options={'c1': 1.5, 'c2': 1.5, 'w': 0.5},
-        bounds=(lb, ub)
-    )
+    # u_pcm bounds (relaxed binary): length = horizon, between 0 and 1.
+    lb[2*(horizon+1):2*(horizon+1)+horizon] = 0.0
+    ub[2*(horizon+1):2*(horizon+1)+horizon] = 1.0
 
-    best_cost, best_pos = optimizer.optimize(fitness, iters=200)
+    # u_hp bounds (relaxed binary): length = horizon, between 0 and 1.
+    lb[2*(horizon+1)+horizon:] = 0.0
+    ub[2*(horizon+1)+horizon:] = 1.0
 
-    rpm_opt = best_pos[:horizon]
-    Q_disc_opt = best_pos[horizon:2*horizon]
-    Q_char_opt = best_pos[2*horizon:3*horizon]
-    u_charge_opt = np.round(best_pos[3*horizon:]).astype(int)
+    bounds = (lb, ub)
+    options = {'c1': 0.5, 'c2': 0.3, 'w': 0.9}
 
-    soc_opt = np.zeros(horizon + 1)
-    soc_opt[0] = soc_init
+    # Wrap the objective function for pyswarms:
+    def obj_func(x):
+        return objective_function(x, hp_system, horizon, dt, start_time,
+                                  rpm_init, soc_init, Q_pcm, T_cond, e_price, load, day_mask)
+
+    # Set up and run the PSO optimizer:
+    optimizer = ps.single.GlobalBestPSO(n_particles=n_particles, dimensions=dim,
+                                          options=options, bounds=bounds)
+    best_cost, best_pos = optimizer.optimize(obj_func, iters=iters)
+
+    # Extract and parse the best solution:
+    rpm_sol = best_pos[0:(horizon+1)]
+    soc_sol = best_pos[(horizon+1):2*(horizon+1)]
+    u_pcm_sol = best_pos[2*(horizon+1):2*(horizon+1)+horizon]
+    u_hp_sol = best_pos[2*(horizon+1)+horizon:]
+    # Threshold the binary variables
+    u_pcm_sol = (u_pcm_sol >= 0.5).astype(float)
+    u_hp_sol = (u_hp_sol >= 0.5).astype(float)
+
+    # Compute Q_action for each time step
+    Q_action_arr = np.zeros(horizon)
     for t in range(horizon):
-        soc_opt[t+1] = soc_opt[t] - (Q_disc_opt[t] * dt / 3600.0)/27.0 + (Q_char_opt[t] * dt / 3600.0)/32.0
+        mask = day_mask[t]
+        Q_dot_pcm = Q_pcm * (1 - mask) - Q_pcm * mask
+        Q_action_arr[t] = Q_dot_pcm * dt / 3600.0
 
-    res_df = pd.DataFrame({
-        'rpm': rpm_opt,
-        'Q_discharge': Q_disc_opt,
-        'Q_charge': Q_char_opt,
-        'u_charge': u_charge_opt,
-        'storage_energy': soc_opt[:-1],
+    res = {
+        'rpm': rpm_sol[1:],     # Exclude the initial condition
+        'u_hp': u_hp_sol,
+        'Q_pcm': Q_action_arr * u_pcm_sol,
+        'soc': soc_sol[:-1],     # Use soc up to the penultimate step
         'outdoor_temp': T_cond,
         'e_price': e_price,
-        'best_cost': best_cost
-    })
-
+        'load': load,
+        'u_pcm': u_pcm_sol
+    }
+    res_df = pd.DataFrame(res)
     return res_df
-
