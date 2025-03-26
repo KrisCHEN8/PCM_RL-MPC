@@ -7,121 +7,15 @@ sys.path.insert(0, os.path.abspath('.'))
 print("Python Path:", sys.path[0])
 
 # Now import your module
-from env.pcm_storage import hp_system, pcm_system
 import numpy as np
 import pandas as pd
-import cvxpy as cp
 from datetime import timedelta
 from env.pcm_storage import hp_system
 import pyswarms as ps
 
-
 hp_system = hp_system(dt=900)  # Initialize the HP system
 
-df = pd.read_pickle('data/total_df_hourly.pkl')
-
-
-def mpc_controller(
-        hp_system,
-        horizon=12, dt=3600,
-        datetime='2021-06-01 10:00:00', df=df,
-        rpm_init=2000, soc_init=1.0, Q_pcm=5.0
-):
-    start_time = pd.to_datetime(datetime)
-
-    rpm = cp.Variable(horizon + 1, nonneg=True)
-    soc = cp.Variable(horizon + 1, nonneg=True)
-    u_pcm = cp.Variable(horizon, boolean=True)
-    u_hp = cp.Variable(horizon, boolean=True)
-
-    T_cond = df.loc[
-        datetime:datetime+timedelta(hours=horizon-1),
-        'outdoor_temp'].values
-
-    e_price = df.loc[
-        datetime:datetime+timedelta(hours=horizon-1),
-        'e_price'].values * 0.001
-
-    load = df.loc[
-        datetime:datetime+timedelta(hours=horizon-1),
-        'load'].values
-
-    constraints = [
-        rpm[0] == rpm_init,
-        soc[0] == soc_init
-        ]
-
-    cost = 0
-
-    delta_rpm = 500  # maximum allowed change between time steps
-    for t in range(horizon):
-        constraints += [cp.abs(rpm[t+1] - rpm[t]) <= delta_rpm]
-
-    for t in range(horizon):
-        time_step = start_time + timedelta(hours=t)
-
-        # Define daytime hours (e.g., 9 AM to 9 PM)
-        day_start, day_end = 9, 21
-
-        # Create a binary mask for daytime
-        daytime_mask = 1 if day_start <= time_step.hour < day_end else 0
-
-        Q_dot_pcm = Q_pcm * (1 - daytime_mask) - Q_pcm * daytime_mask
-
-        # HP Cooling power
-        Q_dot_cool = hp_system.Q_intercept + hp_system.a * rpm[t+1] + \
-            hp_system.b * T_cond[t] + hp_system.c * rpm[t+1]**2 + \
-            hp_system.d * T_cond[t]**2
-
-        EER = hp_system.EER_intercept + hp_system.e * rpm[t+1] + \
-            hp_system.f * T_cond[t] + hp_system.g * rpm[t+1]**2 + \
-            hp_system.h * T_cond[t]**2
-
-        Q_cool = Q_dot_cool * (dt / 3600.0) * u_hp[t]
-        e_hp = Q_cool / EER  # if EER != 0 else 0.0
-        Q_action = Q_dot_pcm * dt / 3600.0
-
-        # SoC update
-        constraints += [
-            soc[t+1] == soc[t] + u_pcm[t] * Q_action / 27.0
-            ]
-
-        # Energy balance constraints enforcing exclusive modes:
-        constraints += [
-            Q_cool + u_pcm[t] * Q_action == load[t]
-            ]
-
-        # RPM limits
-        constraints += [
-            rpm[t+1] <= 2900,
-            rpm[t+1] >= 1200
-            ]
-
-        # SoC constraints
-        constraints += [
-            soc[t+1] <= 1.0,
-            soc[t+1] >= 0.0
-            ]
-
-        # Accumulate cost
-        cost += e_price[t] * e_hp
-
-    problem = cp.Problem(cp.Minimize(cost), constraints)
-    problem.solve()
-
-    res = {
-        'rpm': rpm.value[1:],
-        'u_hp': u_hp.value,
-        'Q_pcm': Q_action * u_pcm.value,
-        'soc': soc.value[:-1],
-        'outdoor_temp': T_cond,
-        'e_price': e_price,
-        'load': load
-    }
-
-    res_df = pd.DataFrame(res)
-
-    return res_df
+df = pd.read_pickle('data/total_df.pkl')
 
 
 def objective_function(x, hp_system, horizon, dt, start_time,
@@ -130,13 +24,13 @@ def objective_function(x, hp_system, horizon, dt, start_time,
     Computes the cost for each particle. The decision vector ordering is:
       [rpm[0], ..., rpm[horizon], soc[0], ..., soc[horizon],
        u_pcm[0], ..., u_pcm[horizon-1], u_hp[0], ..., u_hp[horizon-1]]
-       
+
     Constraints are imposed via penalty terms.
     """
     n_particles = x.shape[0]
     costs = np.zeros(n_particles)
     penalty_factor = 1e8  # Adjust this factor as needed
-    delta_rpm = 500       # Maximum allowed change in rpm per time step
+    delta_rpm = 300       # Maximum allowed change in rpm per time step
 
     for i in range(n_particles):
         particle = x[i, :]
@@ -215,26 +109,25 @@ def objective_function(x, hp_system, horizon, dt, start_time,
 
     return costs
 
-def mpc_controller_pso(hp_system, horizon=12, dt=3600,
-                            datetime_str='2021-06-01 10:00:00', df=None,
-                            rpm_init=2000, soc_init=1.0, Q_pcm=5.0,
-                            iters=100, n_particles=50):
+def mpc_pso_15T(hp_system, horizon=12, dt=900, datetime_str='2021-06-01 00:00:00',
+                df=None, rpm_init=2000, soc_init=1.0, Q_pcm=5.0, iters=100,
+                n_particles=50):
     """
-    Solves the MPC problem using pyswarms with the same objective, constraints, and variables
-    as the cvxpy formulation. The function returns a DataFrame with the computed trajectories.
+    Solves the MPC problem using pyswarms.
     """
     if df is None:
         raise ValueError("A valid dataframe 'df' must be provided.")
 
     start_time = pd.to_datetime(datetime_str)
-    end_time = start_time + timedelta(hours=horizon-1)
+    # For 15-minute steps, compute the end_time accordingly:
+    end_time = start_time + timedelta(seconds=dt*(horizon-1))
     # Extract the necessary data from the dataframe
     T_cond = df.loc[datetime_str:end_time, 'outdoor_temp'].values
     e_price = df.loc[datetime_str:end_time, 'e_price'].values * 0.001
     load = df.loc[datetime_str:end_time, 'load'].values
 
     # Precompute a binary mask for daytime (1 if between 9:00 and 21:00, else 0)
-    day_mask = np.array([1 if 9 <= (start_time + timedelta(hours=t)).hour < 21 else 0 
+    day_mask = np.array([1 if 9 <= (start_time + timedelta(seconds=dt*t)).hour < 21 else 0
                          for t in range(horizon)])
 
     # Total decision vector dimension:
@@ -244,7 +137,7 @@ def mpc_controller_pso(hp_system, horizon=12, dt=3600,
     # Define lower and upper bounds for each decision variable:
     lb = np.zeros(dim)
     ub = np.zeros(dim)
-    
+
     # rpm bounds: index 0 fixed to rpm_init; indices 1..horizon between 1200 and 2900.
     lb[0] = rpm_init
     ub[0] = rpm_init
@@ -295,14 +188,15 @@ def mpc_controller_pso(hp_system, horizon=12, dt=3600,
         Q_action_arr[t] = Q_dot_pcm * dt / 3600.0
 
     res = {
-        'rpm': rpm_sol[1:],     # Exclude the initial condition
+        'rpm': rpm_sol[1:],
         'u_hp': u_hp_sol,
         'Q_pcm': Q_action_arr * u_pcm_sol,
-        'soc': soc_sol[:-1],     # Use soc up to the penultimate step
+        'soc': soc_sol[:-1],
         'outdoor_temp': T_cond,
         'e_price': e_price,
         'load': load,
         'u_pcm': u_pcm_sol
     }
     res_df = pd.DataFrame(res)
+
     return res_df
