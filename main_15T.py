@@ -6,8 +6,9 @@ from models.mpc_15T import mpc_pso_15T
 
 
 # load data
-cwd = os.getcwd()
-total_df = pd.read_pickle(os.path.join(cwd, 'data', 'total_df.pkl'))
+data_dir = os.path.join(os.getcwd(), 'data')
+total_df = pd.read_pickle(os.path.join(data_dir, 'total_df.pkl'))
+total_df = pd.read_pickle(os.path.join(data_dir, 'total_df.pkl'))
 
 start_date = pd.to_datetime('2021-06-01 00:00:00')
 end_date = start_date + timedelta(days=31)

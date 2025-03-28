@@ -29,8 +29,9 @@ def objective_function(x, hp_system, horizon, dt, start_time,
     """
     n_particles = x.shape[0]
     costs = np.zeros(n_particles)
-    penalty_factor = 1e8  # Adjust this factor as needed
-    delta_rpm = 300       # Maximum allowed change in rpm per time step
+    penalty_factor = 1e8
+    hp_change_penalty = 5
+    delta_rpm = 300
 
     for i in range(n_particles):
         particle = x[i, :]
@@ -49,6 +50,7 @@ def objective_function(x, hp_system, horizon, dt, start_time,
 
         cost = 0.0
         penalty = 0.0
+        skew_rate = 0.0
 
         # Penalize deviations from the initial conditions
         penalty += penalty_factor * ((rpm[0] - rpm_init)**2)
@@ -105,7 +107,11 @@ def objective_function(x, hp_system, horizon, dt, start_time,
             # Accumulate operating cost (energy price * HP energy consumption)
             cost += e_price[t] * e_hp
 
-        costs[i] = cost + penalty
+        # Control action skew rate penalty
+        for t in range(horizon-1):
+            skew_rate += hp_change_penalty * (u_hp[t+1] - u_hp[t])**2
+
+        costs[i] = cost + penalty + skew_rate
 
     return costs
 
