@@ -1,8 +1,11 @@
 import pandas as pd
+import numpy as np
+if not hasattr(np, 'float_'):
+    np.float_ = np.float64
 import os
 from datetime import timedelta
 from env.pcm_storage import hp_system
-from models.mpc_1H import mpc_pso_1H, mpc_pyomo_1H
+from models.mpc_1H import mpc_cvxpy_1H, mpc_pyomo_1H
 
 
 # load data
@@ -27,11 +30,10 @@ soc_init = 0.0
 
 while date < end_date - timedelta(hours=horizon):
     # Run the MPC controller
-    res = mpc_pyomo_1H(
+    res, soc_init = mpc_pyomo_1H(
                     hp_system, horizon=horizon, dt=dt,
-                    datetime_str=date, df=total_df_hourly,
-                    rpm_init=rpm_init, soc_init=soc_init, Q_pcm=5.0,
-                    solver_name='bonmin'
+                    datetime=date, df=total_df_hourly,
+                    soc_init=soc_init, Q_pcm=5.0
     )
 
     print(f'Current date: {date}')
@@ -42,8 +44,5 @@ while date < end_date - timedelta(hours=horizon):
         axis=0,
         ignore_index=True
     )
-
-    rpm_init = res['rpm'].values[-1]
-    soc_init = res['soc'].values[-1]
 
 results.to_pickle('./results/results_1H.pkl')
