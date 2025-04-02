@@ -117,7 +117,7 @@ class pcm_system(object):
         observation = {
             'SoC': self.SoC,  # state of charge in kWh
             'Q_dot_discharge': Q_dot_discharge,  # Discharge power in kW
-            'Q_discharge': (Q_dot_discharge * self.dt / 3600.0)  # Discharge energy 
+            'Q_discharge': (Q_dot_discharge * self.dt / 3600.0)
         }
 
         return observation

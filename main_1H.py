@@ -4,8 +4,8 @@ if not hasattr(np, 'float_'):
     np.float_ = np.float64
 import os
 from datetime import timedelta
-from env.pcm_storage import hp_system
-from models.mpc_1H import mpc_cvxpy_1H, mpc_pyomo_1H
+from models.mpc_1H import mpc_cvxpy_1H
+from models.linear_hp import hp_invert
 
 
 # load data
@@ -13,27 +13,27 @@ data_dir = os.path.join(os.getcwd(), 'data')
 total_df = pd.read_pickle(os.path.join(data_dir, 'total_df.pkl'))
 total_df_hourly = pd.read_pickle(os.path.join(data_dir, 'total_df_hourly.pkl'))
 
-start_date = pd.to_datetime('2021-06-01 00:00:00')
-end_date = start_date + timedelta(days=10)
+start_date = pd.to_datetime('2021-07-01 00:00:00')
+end_date = start_date + timedelta(days=31)
 
 date = start_date
 
 results = pd.DataFrame()
 
-horizon = 6  # hours
+horizon = 12  # hours
 dt = 3600  # seconds
 
-hp_system = hp_system(dt=dt)  # Initialize the HP system
-
-rpm_init = 1200
 soc_init = 0.0
 
 while date < end_date - timedelta(hours=horizon):
     # Run the MPC controller
-    res, soc_init = mpc_pyomo_1H(
-                    hp_system, horizon=horizon, dt=dt,
-                    datetime=date, df=total_df_hourly,
-                    soc_init=soc_init, Q_pcm=5.0
+    res, soc_init = mpc_cvxpy_1H(
+        horizon=horizon,
+        dt=dt,
+        datetime=date,
+        df=total_df_hourly,
+        soc_init=soc_init,
+        Q_dot_pcm=10.0
     )
 
     print(f'Current date: {date}')
