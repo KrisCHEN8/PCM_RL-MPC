@@ -19,7 +19,7 @@ date = start_date
 
 results = pd.DataFrame()
 
-horizon = 6  # hours
+horizon = 12  # hours
 dt = 900  # seconds
 
 soc_init = 0.0
@@ -32,8 +32,10 @@ while date < end_date - timedelta(hours=horizon):
         datetime=date,
         df=total_df,
         soc_init=soc_init,
-        Q_dot_pcm=10.0
-    )
+        Q_dot_pcm=10.0,
+        w_penalty=0.1,
+        rpm_changing_rate=300
+    )[0:2]
 
     print(f'Current date: {date}')
     date += timedelta(minutes=15)
