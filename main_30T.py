@@ -4,8 +4,7 @@ if not hasattr(np, 'float_'):
     np.float_ = np.float64
 import os
 from datetime import timedelta
-from models.mpc_30T import mpc_cvxpy
-from models.linear_hp import hp_invert
+from models.mpc_general import mpc_cvxpy
 
 
 # load data
@@ -19,8 +18,8 @@ date = start_date
 
 results = pd.DataFrame()
 
-horizon = 12  # hours
 dt = 1800  # seconds
+horizon = int(12 * (dt / 3600))
 
 soc_init = 0.0
 

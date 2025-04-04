@@ -104,17 +104,18 @@ def hp_invert(Q, T_cond):
 
     # Invert the linear model for Q_dot_cool:
     # Q = intercept + coef_rpm * rpm + coef_T * T_cond   =>   rpm = (Q - intercept - coef_T * T_cond) / coef_rpm
-    rpm = (Q_real - model_Q.intercept_ - model_Q.coef_[1] * T_cond) / model_Q.coef_[0]
+    rpm_single = (Q_real - model_Q.intercept_ - model_Q.coef_[1] * T_cond) / model_Q.coef_[0]
+
 
     # Compute the corresponding EER and e using the other models:
-    EER = model_EER.intercept_ + model_EER.coef_[0] * rpm + model_EER.coef_[1] * T_cond
-    e = model_e.intercept_ + model_e.coef_[0] * rpm + model_e.coef_[1] * T_cond
+    EER = model_EER.intercept_ + model_EER.coef_[0] * rpm_single + model_EER.coef_[1] * T_cond
+    e = (model_e.intercept_ + model_e.coef_[0] * rpm_single + model_e.coef_[1] * T_cond) * 5
 
-    return rpm, EER, e
+    return rpm_single, EER, e
 
 
 if __name__ == "__main__":
-    rpm, EER, e = hp_invert(5, 35)
+    rpm, EER, e = hp_invert(25, 35)
     print(f"rpm: {rpm}, EER: {EER}, e: {e}")
 
 
