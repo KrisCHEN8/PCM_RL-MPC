@@ -4,14 +4,13 @@ if not hasattr(np, 'float_'):
     np.float_ = np.float64
 import os
 from datetime import timedelta
-from models.mpc_1H import mpc_cvxpy_1H
+from models.mpc_1H import mpc_cvxpy
 from models.linear_hp import hp_invert
 
 
 # load data
 data_dir = os.path.join(os.getcwd(), 'data')
-total_df = pd.read_pickle(os.path.join(data_dir, 'total_df.pkl'))
-total_df_hourly = pd.read_pickle(os.path.join(data_dir, 'total_df_hourly.pkl'))
+total_df = pd.read_pickle(os.path.join(data_dir, 'total_df_hourly.pkl'))
 
 start_date = pd.to_datetime('2021-07-01 00:00:00')
 end_date = start_date + timedelta(days=31)
@@ -27,17 +26,19 @@ soc_init = 0.0
 
 while date < end_date - timedelta(hours=horizon):
     # Run the MPC controller
-    res, soc_init = mpc_cvxpy_1H(
+    res, soc_init = mpc_cvxpy(
         horizon=horizon,
         dt=dt,
         datetime=date,
-        df=total_df_hourly,
+        df=total_df,
         soc_init=soc_init,
-        Q_dot_pcm=10.0
-    )
+        Q_dot_pcm=10.0,
+        w_penalty=0.1,
+        rpm_changing_rate=300
+    )[0:2]
 
     print(f'Current date: {date}')
-    date += timedelta(hours=1)
+    date += timedelta(minutes=60)
 
     results = pd.concat(
         [results, res.iloc[0, :].to_frame().T],

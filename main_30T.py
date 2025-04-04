@@ -4,7 +4,7 @@ if not hasattr(np, 'float_'):
     np.float_ = np.float64
 import os
 from datetime import timedelta
-from models.mpc_30T import mpc_cvxpy_30T
+from models.mpc_30T import mpc_cvxpy
 from models.linear_hp import hp_invert
 
 
@@ -26,14 +26,16 @@ soc_init = 0.0
 
 while date < end_date - timedelta(hours=horizon):
     # Run the MPC controller
-    res, soc_init = mpc_cvxpy_30T(
+    res, soc_init = mpc_cvxpy(
         horizon=horizon,
         dt=dt,
         datetime=date,
         df=total_df,
         soc_init=soc_init,
-        Q_dot_pcm=10.0
-    )
+        Q_dot_pcm=10.0,
+        w_penalty=0.1,
+        rpm_changing_rate=300
+    )[0:2]
 
     print(f'Current date: {date}')
     date += timedelta(minutes=30)
