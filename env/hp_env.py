@@ -13,39 +13,38 @@ g = -1.8923608336165108e-06     # coefficient for rpm^2
 h = 0.003420273670974565       # coefficient for T_cond^2
 
 
-def hp_env(rpm, T_cond):
-    if (rpm >= 1200) and (rpm <= 2900):
-        Q_dot_cool_single = (
-            Q_intercept + a * rpm + b * T_cond +
-            c * rpm**2 + d * T_cond**2
-        )
+def hp_env(rpm, T_cond, dt):
+    Q_dot_cool_single = (
+        Q_intercept + a * rpm + b * T_cond +
+        c * rpm**2 + d * T_cond**2
+    )
 
-        Q_dot_cool = Q_dot_cool_single * 5
+    Q_dot_cool = Q_dot_cool_single * 5
 
-        EER = (
-            EER_intercept + e * rpm + f * T_cond +
-            g * rpm**2 + h * T_cond**2
-        )
-        e_hp = Q_dot_cool / EER
-    elif rpm < 1200:
-        Q_dot_cool = 0
-        EER = 0
-        e_hp = 0
+    EER = (
+        EER_intercept + e * rpm + f * T_cond +
+        g * rpm**2 + h * T_cond**2
+    )
+    e_hp = Q_dot_cool / EER * (dt / 3600)
+    # elif rpm < 1200:
+    #     Q_dot_cool = 0
+    #     EER = 0
+    #     e_hp = 0
 
-    elif rpm > 2900:
-        rpm = 2900
-        Q_dot_cool_single = (
-            Q_intercept + a * rpm + b * T_cond +
-            c * rpm**2 + d * T_cond**2
-        )
+    # elif rpm > 2900:
+    #     rpm = 2900
+    #     Q_dot_cool_single = (
+    #         Q_intercept + a * rpm + b * T_cond +
+    #         c * rpm**2 + d * T_cond**2
+    #     )
 
-        Q_dot_cool = Q_dot_cool_single * 5
+        # Q_dot_cool = Q_dot_cool_single * 5
 
-        EER = (
-            EER_intercept + e * rpm + f * T_cond +
-            g * rpm**2 + h * T_cond**2
-        )
-        e_hp = Q_dot_cool / EER
+        # EER = (
+        #     EER_intercept + e * rpm + f * T_cond +
+        #     g * rpm**2 + h * T_cond**2
+        # )
+        # e_hp = Q_dot_cool / EER
 
     return Q_dot_cool, EER, e_hp
 
