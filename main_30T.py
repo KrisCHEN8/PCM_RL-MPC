@@ -25,7 +25,7 @@ horizon = int(12 * (3600 / dt))
 
 soc_init = 0.0
 
-while date < end_date:
+while date <= end_date:
     # Run the MPC controller
     res = mpc_cvxpy(
         horizon=horizon,

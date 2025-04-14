@@ -105,7 +105,8 @@ def mpc_cvxpy(horizon=48, dt=900, datetime=None, df=None, soc_init=0.0,
         # Update state-of-charge.
         constraints += [soc[t+1] == soc[t] + Q_action / tes_capacity,
                         soc[t+1] >= 0,
-                        soc[t+1] <= 1.0]
+                        soc[t+1] <= 1.0,
+                        Q_cool == load[t] + Q_action]
 
         # Accumulate the operational energy cost.
         energy_cost_expr += e_price[t] * e_hp_val
@@ -120,7 +121,7 @@ def mpc_cvxpy(horizon=48, dt=900, datetime=None, df=None, soc_init=0.0,
 
     # Solve the optimization.
     problem = cp.Problem(cp.Minimize(total_cost_expr), constraints)
-    problem.solve(solver=cp.COPT)
+    problem.solve(solver=cp.MOSEK)
 
     # Extract numerical values.
     u_pcm_val = u_pcm.value
